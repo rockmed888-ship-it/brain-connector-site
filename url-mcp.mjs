@@ -7,7 +7,7 @@
 import fs from "fs";
 import http from "http";
 import path from "path";
-import { homeDir, rpc as memoryRpc } from "./memory-mcp.mjs";
+import { homeDir, publicToken, rpc as memoryRpc } from "./memory-mcp.mjs";
 import { rpc as connectorRpc } from "./local-mcp.mjs";
 
 const port = Number(process.env.BRAIN_URL_PORT || 8794);
@@ -44,9 +44,20 @@ const server = http.createServer(async (req, res) => {
     return;
   }
   const url = new URL(req.url || "/", `http://${host}`);
+  const token = publicToken();
+  const gated = url.pathname.match(new RegExp(`^/p/${token}(?:/c/([^/]+))?/mcp/?$`));
+  if (!gated) {
+    if (req.method === "GET" && (url.pathname === "/" || url.pathname === "/mcp")) {
+      res.writeHead(200, { "Content-Type": "text/plain; charset=utf-8" });
+      res.end("Brain Connector\n");
+      return;
+    }
+    sendJson(res, 404, { error: "Not found." });
+    return;
+  }
   if (req.method === "GET") {
     res.writeHead(200, { "Content-Type": "text/plain; charset=utf-8" });
-    res.end(`Brain Connector\nPaste this connector URL:\nhttp://${host}:${port}/mcp\n`);
+    res.end("Brain Connector MCP\n");
     return;
   }
   if (req.method !== "POST") {
@@ -60,7 +71,7 @@ const server = http.createServer(async (req, res) => {
     sendJson(res, 400, { jsonrpc: "2.0", id: null, error: { code: -32700, message: "Parse error" } });
     return;
   }
-  if (url.pathname === "/mcp") {
+  if (!gated[1]) {
     const out = memoryRpc(msg);
     if (!out) {
       res.writeHead(204);
@@ -70,12 +81,7 @@ const server = http.createServer(async (req, res) => {
     sendJson(res, 200, out);
     return;
   }
-  const match = url.pathname.match(/^\/c\/([^/]+)\/mcp$/);
-  if (!match) {
-    sendJson(res, 404, { error: "Not found." });
-    return;
-  }
-  const recordPath = path.join(homeDir(), "connectors", match[1], "connector.json");
+  const recordPath = path.join(homeDir(), "connectors", gated[1], "connector.json");
   if (!fs.existsSync(recordPath)) {
     sendJson(res, 404, { error: "Unknown connector." });
     return;
@@ -95,7 +101,7 @@ const server = http.createServer(async (req, res) => {
 });
 
 server.listen(port, host, () => {
-  const line = `http://${host}:${port}/mcp`;
+  const line = `http://${host}:${port}/p/${publicToken()}/mcp`;
   try {
     fs.mkdirSync(homeDir(), { recursive: true });
     fs.writeFileSync(path.join(homeDir(), "url.txt"), line + "\n");

@@ -4,6 +4,7 @@
  * GPT, Grok, Cursor, and any MCP client plug this in and share one bank
  * on this computer. Key facts stay. Chat overflow is dropped.
  */
+import crypto from "crypto";
 import fs from "fs";
 import os from "os";
 import path from "path";
@@ -19,6 +20,20 @@ export function homeDir() {
   if (process.env.BRAIN_HOME) return process.env.BRAIN_HOME;
   if (process.env.LOCALAPPDATA) return path.join(process.env.LOCALAPPDATA, "BrainConnector");
   return path.join(os.homedir(), "AppData", "Local", "BrainConnector");
+}
+
+export function publicToken() {
+  const file = path.join(homeDir(), "public-token.txt");
+  try {
+    const existing = fs.readFileSync(file, "utf8").trim();
+    if (/^[a-f0-9]{48}$/.test(existing)) return existing;
+  } catch {
+    /* create one */
+  }
+  const token = crypto.randomBytes(24).toString("hex");
+  fs.mkdirSync(homeDir(), { recursive: true });
+  fs.writeFileSync(file, token + "\n");
+  return token;
 }
 
 function memoryFile() {

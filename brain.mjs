@@ -11,7 +11,7 @@ import path from "path";
 import readline from "readline";
 import { spawn } from "child_process";
 import { fileURLToPath } from "url";
-import { addTrail, addTopic, homeDir, listTopics, loadMemory, recallFacts, rememberFact, resetOverflow } from "./memory-mcp.mjs";
+import { addTrail, addTopic, homeDir, listTopics, loadMemory, publicToken, recallFacts, rememberFact, resetOverflow } from "./memory-mcp.mjs";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const home = homeDir();
@@ -200,11 +200,7 @@ function localBuild({ kind, tier, name, source, actions, url }) {
   console.log(`MCP file: ${file}`);
   console.log("It answers only from the notes you passed. It does not send, post, or pay.");
   console.log("Plug brain-memory in the same MCP file so Grok or Cursor can recall the trail.");
-  const pasteUrl = connectorPageUrl(id);
-  fs.writeFileSync(path.join(dir, "url.txt"), pasteUrl + "\n");
-  console.log("Paste this connector URL on a site:");
-  console.log(pasteUrl);
-  return pasteUrl;
+  return id;
 }
 
 async function shopBuild(body) {
@@ -227,12 +223,7 @@ async function shopBuild(body) {
   console.log(`MCP file: ${file}`);
   console.log("Tools follow the plug. The material you passed is the only material it may use.");
   const siteUrl = data.install?.httpMcp?.url || "";
-  if (siteUrl) {
-    fs.writeFileSync(path.join(dir, "url.txt"), siteUrl + "\n");
-    console.log("Paste this connector URL on a site:");
-    console.log(siteUrl);
-    if (data.publicKey) console.log("Authorization: Bearer " + data.publicKey);
-  }
+  if (siteUrl) fs.writeFileSync(path.join(dir, "url.txt"), siteUrl + "\n");
   return siteUrl;
 }
 
@@ -273,16 +264,19 @@ async function buildConnector(list) {
     return;
   }
   let pasteUrl = "";
+  let builtId = "";
   try {
     pasteUrl = await shopBuild({ kind, tier, name, source, actions: actions.join(","), url });
   } catch {
     await ensureUrlServer();
-    pasteUrl = localBuild({ kind, tier, name, source, actions, url });
+    builtId = localBuild({ kind, tier, name, source, actions, url });
   }
-  if (!pasteUrl) {
-    await ensureUrlServer();
-    pasteUrl = connectorPageUrl();
-    console.log("Paste this connector URL on a site:");
+  if (!grokCanReach(pasteUrl)) {
+    const reached = await reachableUrl(builtId);
+    if (reached) pasteUrl = reached;
+  }
+  if (pasteUrl) {
+    console.log("Paste this connector URL into Grok Bot:");
     console.log(pasteUrl);
   }
   if (pasteUrl) {
@@ -329,9 +323,29 @@ function urlPort() {
   return Number(process.env.BRAIN_URL_PORT || 8794);
 }
 
+function grokCanReach(url) {
+  try {
+    const parsed = new URL(url);
+    if (parsed.protocol !== "https:") return false;
+    const host = parsed.hostname.toLowerCase();
+    if (host === "localhost" || host.endsWith(".local")) return false;
+    if (/^\d+\.\d+\.\d+\.\d+$/.test(host)) {
+      const parts = host.split(".").map(Number);
+      const [a, b] = parts;
+      if (a === 10 || a === 127 || (a === 192 && b === 168)) return false;
+      if (a === 172 && b >= 16 && b <= 31) return false;
+      if (a === 100 && b >= 64 && b <= 127) return false;
+    }
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 function connectorPageUrl(id) {
   const base = `http://127.0.0.1:${urlPort()}`;
-  return id ? `${base}/c/${id}/mcp` : `${base}/mcp`;
+  const token = publicToken();
+  return id ? `${base}/p/${token}/c/${id}/mcp` : `${base}/p/${token}/mcp`;
 }
 
 function portOpen(port) {
@@ -342,6 +356,114 @@ function portOpen(port) {
     });
     socket.on("error", () => resolve(false));
   });
+}
+
+function runCapture(cmd, args, ms = 20000) {
+  return new Promise((resolve) => {
+    const child = spawn(cmd, args, { windowsHide: true });
+    let out = "";
+    const timer = setTimeout(() => {
+      child.kill();
+      resolve(out.trim());
+    }, ms);
+    child.stdout.on("data", (d) => {
+      out += d.toString();
+    });
+    child.stderr.on("data", (d) => {
+      out += d.toString();
+    });
+    child.on("close", () => {
+      clearTimeout(timer);
+      resolve(out.trim());
+    });
+    child.on("error", () => {
+      clearTimeout(timer);
+      resolve(out.trim());
+    });
+  });
+}
+
+function parseFunnelHost(text) {
+  const found = String(text || "").match(/https:\/\/[a-z0-9.-]+\.ts\.net/i);
+  return found ? found[0].replace(/\/$/, "") : "";
+}
+
+function cloudflaredBin() {
+  const beside = path.join(home, "cloudflared.exe");
+  if (fs.existsSync(beside)) return beside;
+  if (process.env.CLOUDFLARED_BIN && fs.existsSync(process.env.CLOUDFLARED_BIN)) return process.env.CLOUDFLARED_BIN;
+  return "";
+}
+
+function readTunnelUrl() {
+  const file = path.join(home, "tunnel.txt");
+  try {
+    const text = fs.readFileSync(file, "utf8").trim();
+    if (/^https:\/\/[a-z0-9-]+\.trycloudflare\.com$/i.test(text)) return text.replace(/\/$/, "");
+  } catch {
+    /* not saved yet */
+  }
+  return "";
+}
+
+async function ensureCloudflare() {
+  const saved = readTunnelUrl();
+  const bin = cloudflaredBin();
+  if (!bin) return saved;
+  if (saved) {
+    try {
+      const res = await fetch(saved, { signal: AbortSignal.timeout(8000) });
+      if (res.ok || res.status === 404) return saved;
+    } catch {
+      /* start a new tunnel */
+    }
+  }
+  const log = path.join(home, "tunnel.log");
+  const child = spawn(bin, ["tunnel", "--url", `http://127.0.0.1:${urlPort()}`, "--no-autoupdate"], {
+    detached: true,
+    windowsHide: true,
+    stdio: ["ignore", "ignore", fs.openSync(log, "w")],
+  });
+  child.unref();
+  for (let i = 0; i < 40; i++) {
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    let text = "";
+    try {
+      text = fs.readFileSync(log, "utf8");
+    } catch {
+      text = "";
+    }
+    const found = text.match(/https:\/\/[a-z0-9-]+\.trycloudflare\.com/i);
+    if (found) {
+      const url = found[0].replace(/\/$/, "");
+      fs.writeFileSync(path.join(home, "tunnel.txt"), url + "\n");
+      return url;
+    }
+  }
+  return "";
+}
+
+async function ensureFunnel() {
+  const status = await runCapture("tailscale", ["funnel", "status"]);
+  const port = String(urlPort());
+  let host = parseFunnelHost(status);
+  if (host && status.includes(port)) return host;
+  if (!host) {
+    const started = await runCapture("tailscale", ["funnel", "--bg", port], 8000);
+    if (!/not enabled/i.test(started)) {
+      host = parseFunnelHost(started) || parseFunnelHost(await runCapture("tailscale", ["funnel", "status"]));
+      if (host) return host;
+    }
+  }
+  return ensureCloudflare();
+}
+
+async function reachableUrl(id) {
+  await ensureUrlServer();
+  const host = await ensureFunnel();
+  if (!host) return "";
+  const token = publicToken();
+  return id ? `${host}/p/${token}/c/${id}/mcp` : `${host}/p/${token}/mcp`;
 }
 
 async function ensureUrlServer() {
@@ -679,13 +801,17 @@ async function plugIn(text) {
     console.log("The brain could not be written into an AI config.");
     return;
   }
-  const url = await ensureUrlServer();
+  const url = await reachableUrl();
   const saved = readState();
-  saved.mcpUrl = url || connectorPageUrl();
+  saved.mcpUrl = url;
   writeState(saved);
   console.log("Plugged the brain into " + placed.join(", ") + ".");
-  console.log("Paste this connector URL on a site:");
-  console.log(saved.mcpUrl);
+  if (url) {
+    console.log("Paste this connector URL into Grok Bot:");
+    console.log(url);
+  } else {
+    console.log("Grok Bot needs a public address. Tailscale Funnel did not start, so there is no URL to paste yet.");
+  }
   console.log("Ask in this terminal. " + aiLabel(choice.which) + " answers.");
   console.log("It remembers key facts. Chat overflow can drop. Send, post, and pay stay with you.");
 }
@@ -717,10 +843,9 @@ async function handle(line) {
     return trail.forEach((t) => console.log(`${t.at}  ${t.event}  ${t.detail || ""}`));
   }
   if (text === "mcp") {
-    await ensureUrlServer();
-    const state = readState();
-    console.log("Paste this connector URL on a site:");
-    console.log(state.mcpUrl || connectorPageUrl());
+    const url = await reachableUrl();
+    console.log("Paste this connector URL into Grok Bot:");
+    console.log(url || "No public address yet.");
     return printMcp();
   }
   if (text.startsWith("connect ")) return connect(text.slice(8).trim());
@@ -785,10 +910,9 @@ if (args[0] === "build") {
 } else if (args[0] === "plug") {
   await plugIn(args.slice(1).join(" "));
 } else if (args[0] === "mcp") {
-  await ensureUrlServer();
-  const state = readState();
-  console.log("Paste this connector URL on a site:");
-  console.log(state.mcpUrl || connectorPageUrl());
+  const url = await reachableUrl();
+  console.log("Paste this connector URL into Grok Bot:");
+  console.log(url || "No public address yet.");
   printMcp();
 } else if (args[0] === "ask") {
   console.log(await answer(args.slice(1).join(" ")));
