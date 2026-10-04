@@ -224,7 +224,7 @@ function callTool(name, args) {
   return { isError: true, text: `Unknown tool ${name}` };
 }
 
-function rpc(msg) {
+export function rpc(msg) {
   const id = Object.prototype.hasOwnProperty.call(msg, "id") ? msg.id : null;
   if (msg.method === "notifications/initialized" || msg.method === "initialized") return null;
   if (msg.method === "ping") return { jsonrpc: "2.0", id, result: {} };

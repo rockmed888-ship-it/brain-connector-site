@@ -8,12 +8,12 @@ if (-not $node) {
   Write-Host "Install it from https://nodejs.org, close this window, then run the install again."
   exit 1
 }
-foreach ($name in @("brain.mjs", "local-mcp.mjs", "memory-mcp.mjs")) {
+foreach ($name in @("brain.mjs", "local-mcp.mjs", "memory-mcp.mjs", "url-mcp.mjs")) {
   Invoke-WebRequest -Uri "$shop/$name" -OutFile (Join-Path $dest $name) -UseBasicParsing
 }
 Set-Content -Path (Join-Path $dest "shop.txt") -Value $shop -Encoding ASCII
 Set-Content -Path (Join-Path $dest "brain.cmd") -Value "@echo off`r`nnode `"$dest\brain.mjs`" %*`r`n" -Encoding ASCII
-foreach ($js in @("brain.mjs", "local-mcp.mjs", "memory-mcp.mjs")) {
+foreach ($js in @("brain.mjs", "local-mcp.mjs", "memory-mcp.mjs", "url-mcp.mjs")) {
   $path = Join-Path $dest $js
   & node --check $path
   if ($LASTEXITCODE -ne 0) {
