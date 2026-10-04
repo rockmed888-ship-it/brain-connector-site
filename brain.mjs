@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 /**
  * Brain Connector local terminal.
- * Install, type brain, connect to a site/folder/notes, build an MCP plug.
+ * Install asks which AI. Say grok, gpt, or claude. The brain writes its MCP there.
  * Advertised kinds: website, assistant, automation. No extra editor plugs.
  */
 import fs from "fs";
@@ -265,6 +265,9 @@ async function buildConnector(list) {
   } catch {
     localBuild({ kind, tier, name, source, actions, url });
   }
+  const placed = placeBrain(readState().ai);
+  if (placed.length) console.log("That plug is in " + placed.join(", ") + ".");
+  else console.log("Say who it is for: brain plug grok");
 }
 
 function printMcp() {
@@ -367,8 +370,197 @@ async function answer(question) {
   return "Nothing is connected. Type: brain connect <url or folder>";
 }
 
+function userHome() {
+  return process.env.BRAIN_AI_HOME || os.homedir();
+}
+
+function roaming() {
+  if (process.env.BRAIN_APPDATA) return process.env.BRAIN_APPDATA;
+  if (!process.env.BRAIN_AI_HOME && process.env.APPDATA) return process.env.APPDATA;
+  return path.join(userHome(), "AppData", "Roaming");
+}
+
+function normalizeAi(text) {
+  const said = String(text || "").trim().toLowerCase();
+  const key = said.replace(/[\s_]+/g, "-");
+  const known = {
+    grok: "grok",
+    "grok-build": "grok",
+    gpt: "gpt",
+    chatgpt: "gpt",
+    openai: "gpt",
+    codex: "gpt",
+    cursor: "gpt",
+    claude: "claude",
+    "claude-code": "claude",
+    "claude-desktop": "claude",
+    all: "all",
+  };
+  if (!said) return { which: "all", said: "all", known: true };
+  if (known[key]) return { which: known[key], said: key, known: true };
+  if (said.includes("grok")) return { which: "grok", said, known: true };
+  if (said.includes("claude")) return { which: "claude", said, known: true };
+  if (said.includes("gpt") || said.includes("chatgpt") || said.includes("openai")) {
+    return { which: "gpt", said, known: true };
+  }
+  return { which: "all", said, known: false };
+}
+
+function tomlLiteral(value) {
+  return "'" + String(value).replace(/'/g, "''") + "'";
+}
+
+function stripTomlServer(text, name) {
+  const lines = String(text || "").split(/\r?\n/);
+  const out = [];
+  let skipping = false;
+  const header = `[mcp_servers.${name}]`;
+  const child = `[mcp_servers.${name}.`;
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (trimmed === header || trimmed.startsWith(child)) {
+      skipping = true;
+      continue;
+    }
+    if (skipping && trimmed.startsWith("[")) skipping = false;
+    if (!skipping) out.push(line);
+  }
+  return out.join("\n").replace(/\n{3,}/g, "\n\n").trim();
+}
+
+function upsertToml(file, servers) {
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  let text = "";
+  try {
+    text = fs.readFileSync(file, "utf8");
+  } catch {
+    text = "";
+  }
+  for (const server of servers) {
+    text = stripTomlServer(text, server.name);
+  }
+  const blocks = servers.map((server) => {
+    const args = server.args.map(tomlLiteral).join(", ");
+    return [
+      `[mcp_servers.${server.name}]`,
+      `command = ${tomlLiteral(server.command)}`,
+      `args = [${args}]`,
+      "enabled = true",
+    ].join("\n");
+  });
+  const next = [text.trim(), blocks.join("\n\n")].filter(Boolean).join("\n\n") + "\n";
+  fs.writeFileSync(file, next);
+}
+
+function upsertMcpJson(file, servers) {
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  let data = {};
+  if (fs.existsSync(file)) {
+    try {
+      data = JSON.parse(fs.readFileSync(file, "utf8"));
+    } catch {
+      throw new Error("Could not read " + file);
+    }
+  }
+  if (!data || typeof data !== "object" || Array.isArray(data)) data = {};
+  if (!data.mcpServers || typeof data.mcpServers !== "object" || Array.isArray(data.mcpServers)) {
+    data.mcpServers = {};
+  }
+  for (const server of servers) {
+    data.mcpServers[server.name] = { command: server.command, args: server.args };
+  }
+  fs.writeFileSync(file, JSON.stringify(data, null, 2) + "\n");
+}
+
+function latestMcpFile() {
+  const connectors = path.join(home, "connectors");
+  try {
+    const dirs = fs.readdirSync(connectors).map((name) => path.join(connectors, name, "mcp.json"));
+    return dirs.filter((f) => fs.existsSync(f)).sort((a, b) => fs.statSync(b).mtimeMs - fs.statSync(a).mtimeMs)[0] || "";
+  } catch {
+    return "";
+  }
+}
+
+function serversToWrite() {
+  const servers = [{ name: "brain-memory", command: process.execPath, args: [memoryServer()] }];
+  const latest = latestMcpFile();
+  if (!latest) return servers;
+  try {
+    const existing = JSON.parse(fs.readFileSync(latest, "utf8"));
+    for (const [name, spec] of Object.entries(existing.mcpServers || {})) {
+      if (!spec || name === "brain-memory") continue;
+      if (!/^[A-Za-z_][A-Za-z0-9_-]*$/.test(name)) continue;
+      servers.push({
+        name,
+        command: String(spec.command || process.execPath),
+        args: Array.isArray(spec.args) ? spec.args.map(String) : [],
+      });
+    }
+  } catch {
+    /* memory only */
+  }
+  return servers;
+}
+
+function targetsFor(which) {
+  const root = userHome();
+  const app = roaming();
+  const all = {
+    grok: [{ kind: "toml", file: path.join(root, ".grok", "config.toml"), label: "Grok" }],
+    gpt: [
+      { kind: "toml", file: path.join(root, ".codex", "config.toml"), label: "GPT" },
+      { kind: "json", file: path.join(root, ".cursor", "mcp.json"), label: "Cursor" },
+    ],
+    claude: [
+      { kind: "json", file: path.join(root, ".claude.json"), label: "Claude" },
+      { kind: "json", file: path.join(app, "Claude", "claude_desktop_config.json"), label: "Claude Desktop" },
+    ],
+  };
+  if (which === "all") return [...all.grok, ...all.gpt, ...all.claude];
+  return all[which] || all.grok;
+}
+
+function placeBrain(which) {
+  if (!which) return [];
+  const servers = serversToWrite();
+  const labels = [];
+  for (const target of targetsFor(which)) {
+    try {
+      if (target.kind === "toml") upsertToml(target.file, servers);
+      else upsertMcpJson(target.file, servers);
+      labels.push(target.label);
+    } catch (e) {
+      console.log(target.label + " was left unchanged. " + (e.message || "Could not write the connector."));
+    }
+  }
+  return labels;
+}
+
+function plugIn(text) {
+  const choice = normalizeAi(text);
+  const state = readState();
+  state.ai = choice.which;
+  state.aiSaid = choice.said;
+  writeState(state);
+  addTrail("plug", choice.said || choice.which);
+  const placed = placeBrain(choice.which);
+  if (!placed.length) {
+    console.log("The brain could not be written into an AI config.");
+    return;
+  }
+  console.log("Plugged the brain into " + placed.join(", ") + ".");
+  if (!choice.known) {
+    console.log("grok, gpt, and claude are preloaded. Open a new chat in the one you use.");
+  } else {
+    console.log("Open a new chat. The brain is already connected.");
+  }
+  console.log("It remembers key facts. Chat overflow can drop. Send, post, and pay stay with you.");
+}
+
 function help() {
   console.log("Brain Connector is on this computer.");
+  console.log("plug grok                      write the brain into Grok, GPT, or Claude");
   console.log("plugs                          advertised kinds: website, assistant, automation");
   console.log("connect <url or folder>        inspect the target and attach its notes");
   console.log("build --kind website --tier hobby --name \"Name\" --source \"notes\"");
@@ -378,7 +570,7 @@ function help() {
   console.log("recall [query]                 search the shared memory bank (free)");
   console.log("trail                          recent connects, builds, topics");
   console.log("reset                          drop overflow. keep key facts");
-  console.log("mcp                            print MCP JSON so GPT / Grok share memory");
+  console.log("mcp                            print the MCP JSON");
   console.log("ask <question>                 talk from the attached notes");
 }
 
@@ -386,6 +578,7 @@ async function handle(line) {
   const text = String(line || "").trim();
   if (!text) return;
   if (text === "help" || text === "plugs" || text === "scan") return printPlugs();
+  if (text === "plug" || text.startsWith("plug ")) return plugIn(text === "plug" ? "" : text.slice(5));
   if (text === "trail") {
     const trail = loadMemory().trail;
     if (!trail.length) return console.log("No trail yet.");
@@ -451,6 +644,8 @@ if (args[0] === "build") {
   const trail = loadMemory().trail;
   if (!trail.length) console.log("No trail yet.");
   else trail.forEach((t) => console.log(`${t.at}  ${t.event}  ${t.detail || ""}`));
+} else if (args[0] === "plug") {
+  plugIn(args.slice(1).join(" "));
 } else if (args[0] === "mcp") {
   printMcp();
 } else if (args[0] === "ask") {
@@ -460,6 +655,13 @@ if (args[0] === "build") {
 } else {
   help();
   const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+  if (!readState().ai) {
+    console.log("");
+    console.log("Which AI should this brain plug into?");
+    console.log("Say grok, gpt, claude, or all.");
+    const first = await new Promise((resolve) => rl.question("brain> ", resolve));
+    plugIn(first);
+  }
   const loop = () =>
     rl.question("brain> ", async (line) => {
       if (line.trim() === "exit") {

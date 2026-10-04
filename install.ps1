@@ -27,4 +27,16 @@ if ($userPath -notlike "*${dest}*") {
   [Environment]::SetEnvironmentVariable("Path", ($userPath.TrimEnd(";") + ";" + $dest), "User")
 }
 Write-Host "Brain Connector is installed."
-Write-Host "Open a NEW terminal and type:  brain"
+Write-Host ""
+Write-Host "Which AI should this brain plug into?"
+Write-Host "Say grok, gpt, claude, or all."
+$who = "all"
+try {
+  $typed = Read-Host "brain"
+  if ($typed) { $who = $typed.Trim() }
+} catch {
+  Write-Host "No answer. Plugging grok, gpt, and claude."
+}
+& node (Join-Path $dest "brain.mjs") plug $who
+if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+Write-Host "Open a new chat in that AI. The brain is already connected."
