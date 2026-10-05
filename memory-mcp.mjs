@@ -208,6 +208,21 @@ const TOOLS = [
     description: "Chat overload reset. Drops overflow notes. Keeps key facts the user asked to remember, and recent topics.",
     inputSchema: { type: "object", properties: {} },
   },
+  {
+    name: "dent_scan",
+    description: "Run as the Dent Coins scanner. Coach the photo scan. Do not invent a private read. Then lead them to list or buy.",
+    inputSchema: { type: "object", properties: { question: { type: "string" } } },
+  },
+  {
+    name: "dent_discuss",
+    description: "Chat about the Dent Coins site: feed, fees, scan, marketplace, and listings. End by leading them to buy or sell.",
+    inputSchema: { type: "object", properties: { question: { type: "string" }, page: { type: "string" } } },
+  },
+  {
+    name: "dent_deal",
+    description: "Salesman for Dent Coins. Objective is to lead the person to buy on the marketplace or sell by listing a coin.",
+    inputSchema: { type: "object", properties: { question: { type: "string" }, page: { type: "string" } } },
+  },
 ];
 
 function callTool(name, args) {
@@ -236,7 +251,57 @@ function callTool(name, args) {
   if (name === "brain_reset") {
     return { isError: false, text: resetOverflow().text };
   }
+  if (name === "dent_scan") return { isError: false, text: dentScan(args?.question) };
+  if (name === "dent_discuss") return { isError: false, text: dentDiscuss(args?.question, args?.page) };
+  if (name === "dent_deal") return { isError: false, text: dentDeal(args?.question, args?.page) };
   return { isError: true, text: `Unknown tool ${name}` };
+}
+
+function dentScan(question) {
+  const asked = String(question || "").trim();
+  return [
+    "I'm the Dent Coins scanner.",
+    "Open https://dtfdentcoin.com/scan and shoot the front and the back in even light. Add an edge or mint-mark shot if you can. Up to five photos.",
+    "The number is a photo score, a range, not a PCGS or NGC grade. I will not invent the private read.",
+    "When the score is in, list the coin at https://dtfdentcoin.com/list or shop raw coins at https://dtfdentcoin.com/marketplace.",
+    asked ? `You asked: ${asked.slice(0, 240)}` : "",
+  ]
+    .filter(Boolean)
+    .join(" ");
+}
+
+function dentDiscuss(question, page) {
+  const asked = String(question || "").trim();
+  const where = String(page || "").trim();
+  return [
+    "Dent Coins is a marketplace for raw coins. The feed is https://dtfdentcoin.com/community. Fees and buyer protection are on the site. DTF is a photo range, not a slab.",
+    where ? `This page is ${where}.` : "Talk about the page they are on.",
+    "Scanner: https://dtfdentcoin.com/scan. Buy: https://dtfdentcoin.com/marketplace. Sell: https://dtfdentcoin.com/list.",
+    "Stay in the discussion, then invite them to buy or sell.",
+    asked ? `You asked: ${asked.slice(0, 240)}` : "",
+  ]
+    .filter(Boolean)
+    .join(" ");
+}
+
+function dentDeal(question, page) {
+  const asked = String(question || "").trim().toLowerCase();
+  const sell = /\b(sell|list)\b/.test(asked);
+  const buy = /\b(buy|shop|browse)\b/.test(asked);
+  const next = sell && !buy
+    ? "List it at https://dtfdentcoin.com/list. Listing is free."
+    : buy && !sell
+      ? "Shop raw coins at https://dtfdentcoin.com/marketplace."
+      : "Scan it at https://dtfdentcoin.com/scan, list it at https://dtfdentcoin.com/list, or shop https://dtfdentcoin.com/marketplace.";
+  return [
+    "I'm the Dent Coins salesman. The job is to help someone buy or sell a raw coin.",
+    page ? `They are on ${page}.` : "",
+    next,
+    "Do not invent a price or promise the coin will sell. They still tap the button.",
+    asked ? `You asked: ${String(question).trim().slice(0, 240)}` : "",
+  ]
+    .filter(Boolean)
+    .join(" ");
 }
 
 export function rpc(msg) {
